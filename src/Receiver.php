@@ -96,15 +96,18 @@ class Receiver
     {
         $this->response = json_decode(urldecode(file_get_contents('php://input')), true);
         if (!$this->response) {
-
             throw new RequestException("接收数据解析失败，可能是服务端事件通知推送异常了。" . file_get_contents('php://input'), -1);
         }
         !empty($config['secret']) && $this->app_secret = $config['secret'];
         if ($this->getEventType() == 'push') {
-            $this->msg = $this->originMsg = $this->response['data'][0];
-            if (empty($this->msg['msg_id'])) {
-                throw new RequestException("用户消息通知解析失败，可能是该用户有大量未读的消息。信息体：" . json_encode($this->response, JSON_UNESCAPED_UNICODE), -1);
+            if (!empty($this->response['data']) && is_array($this->response['data'])) {
+                $arr = [];
+                foreach ($this->response['data'] as $key => $val) {
+                    $arr[lcfirst($key)] = $val;
+                }
+                $this->response['data'] = $arr;
             }
+            $this->msg = $this->originMsg = $this->response['data'];
             $this->setParams();
         }
     }
@@ -161,7 +164,7 @@ class Receiver
      */
     public function getLoginInfo()
     {
-        if ($this->response['event'] != 'login_success') {
+        if ($this->response['event_type'] != 'login_success') {
             return [];
         }
         return $this->response['data'];
@@ -173,7 +176,7 @@ class Receiver
      */
     public function getEventType()
     {
-        return !empty($this->response['event']) ? $this->response['event'] : '';
+        return !empty($this->response['event_type']) ? $this->response['event_type'] : '';
     }
 
     /**
@@ -182,7 +185,16 @@ class Receiver
      */
     public function getMsgType()
     {
-        return $this->msg['sub_type'];
+        return $this->msg['msgType'];
+    }
+
+    /**
+     * 获取消息接受的用户，一般是自己
+     * @return bool
+     */
+    public function getToUserName()
+    {
+        return $this->msg['toUserName'];
     }
 
     /**
@@ -218,7 +230,7 @@ class Receiver
      */
     public function getMsgId()
     {
-        return $this->msg['msg_id'];
+        return $this->msg['msgId'];
     }
 
     /**
@@ -227,7 +239,7 @@ class Receiver
      */
     public function getFromUser()
     {
-        return $this->msg['from_user'];
+        return $this->msg['fromUserName'];
     }
 
     /**
@@ -236,7 +248,7 @@ class Receiver
      */
     public function isAtMe()
     {
-        if (!empty($this->msg['description']) && strpos($this->msg['description'], "在群聊中@了你") !== false) {
+        if (!empty($this->msg['pushContent']) && strpos($this->msg['pushContent'], "在群聊中@了你") !== false) {
             return true;
         }
         return false;
@@ -253,10 +265,10 @@ class Receiver
         $this->msg['at_users'] = [];
 
         /** 1好友 2群聊 3公众号 4微信 */
-        if (!empty($this->msg['from_user'])) {
-            strpos($this->msg['from_user'], "@chatroom") !== false && $this->msg['from_type'] = 2;
-            strpos($this->msg['from_user'], "gh_") !== false && $this->msg['from_type'] = 3;
-            strpos($this->msg['from_user'], "gh_") !== false && $this->msg['from_type'] = 4;
+        if (!empty($this->msg['fromUserName'])) {
+            strpos($this->msg['fromUserName'], "@chatroom") !== false && $this->msg['from_type'] = 2;
+            strpos($this->msg['fromUserName'], "gh_") !== false && $this->msg['from_type'] = 3;
+            strpos($this->msg['fromUserName'], "gh_") !== false && $this->msg['from_type'] = 4;
         }
 
         /** 处理消息内容 */
@@ -268,21 +280,21 @@ class Receiver
                 $content = str_replace(":\n", '', $content);
             } else {
                 $content = $this->msg['content'];
-                $send_wxid = $this->msg['from_user'];
+                $send_wxid = $this->msg['fromUserName'];
             }
             $this->msg['content'] = $content;
             $this->msg['send_wxid'] = $send_wxid;
             /** 处理at_user数据 */
-            if (strpos($this->msg['msg_source'], "atuserlist") !== false) {
-                $at_user = strstr($this->msg['msg_source'], '<atuserlist>', false);
+            if (strpos($this->msg['msgSource'], "atuserlist") !== false) {
+                $at_user = strstr($this->msg['msgSource'], '<atuserlist>', false);
                 $at_user = strstr($at_user, '</atuserlist>', true);
                 $at_user = str_replace(["<atuserlist>"], '', $at_user);
                 $this->msg['at_users'] = explode(',', $at_user);
             }
 
-            if (in_array($this->msg['sub_type'], [$this::MSG_WECHAT_PUSH])) {
+            if (in_array($this->msg['msgType'], [$this::MSG_WECHAT_PUSH, $this::MSG_CALLBACK, 0])) {
                 if (strpos($this->msg['content'], '加入了群聊') !== false) {
-                    $this->msg['sub_type'] = $this::MSG_INVITE_USER;//'邀请\"周先生??\"加入了群聊'
+                    $this->msg['msgType'] = $this::MSG_INVITE_USER;//'邀请\"周先生??\"加入了群聊'
                     $str = strstr($this->msg['content'], '邀请"');
                     $str = strstr($str, "\"加入了群聊", true);
                     $this->msg['invite_name'] = str_replace('邀请"', '', $str);
@@ -317,7 +329,7 @@ class Receiver
             xml_parser_free($p);
 
             $type = $vals[$index['TYPE'][0]]['value'];
-            $this->msg['sub_type'] = $type;
+            $this->msg['msgType'] = $type;
             if ($type == 2000) {//转账
                 $desc = $vals[$index['PAY_MEMO'][0]]['value'];
                 $amount = $vals[$index['FEEDESC'][0]]['value'];
@@ -345,7 +357,7 @@ class Receiver
                 return compact('title', 'content', 'url', 'img', 'template_id', 'native_url', 'scene_id', 'pay_msg_id', 'invalid_time');
             }
             if ($type == 5) {//链接
-                $this->msg['sub_type'] = $this::MSG_SHARE_LINK;
+                $this->msg['msgType'] = $this::MSG_SHARE_LINK;
                 $img = $vals[$index['THUMBURL'][0]]['value'];
                 $show_type = $vals[$index['SHOWTYPE'][0]]['value'];
                 $title = $vals[$index['TITLE'][0]]['value'];
@@ -354,7 +366,7 @@ class Receiver
                 return compact('title', 'content', 'img', 'url', 'show_type');
             }
             if ($type == 6) {//文件
-                $this->msg['sub_type'] = $this::MSG_SHARE_FILE;
+                $this->msg['msgType'] = $this::MSG_SHARE_FILE;
                 $img = $vals[$index['THUMBURL'][0]]['value'];
                 $show_type = $vals[$index['SHOWTYPE'][0]]['value'];
                 $title = $vals[$index['TITLE'][0]]['value'];
@@ -363,7 +375,7 @@ class Receiver
                 return compact('title', 'content', 'img', 'url', 'show_type');
             }
             if ($type == 16) {//卡券消息
-                $this->msg['sub_type'] = $this::MSG_SHARE_COUPON;
+                $this->msg['msgType'] = $this::MSG_SHARE_COUPON;
                 $img = $vals[$index['THUMBURL'][0]]['value'];
                 $show_type = $vals[$index['SHOWTYPE'][0]]['value'];
                 $title = $vals[$index['TITLE'][0]]['value'];
